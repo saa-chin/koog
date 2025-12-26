@@ -80,7 +80,8 @@ class SingleLLMPromptExecutorIntegrationTest : ExecutorIntegrationTestBase() {
             return Stream.of(
                 LLMProvider.OpenAI,
                 LLMProvider.MistralAI,
-                LLMProvider.OpenRouter
+                LLMProvider.OpenRouter,
+                LLMProvider.Google,
             ).map { provider -> Arguments.of(provider) }
         }
 
@@ -104,6 +105,12 @@ class SingleLLMPromptExecutorIntegrationTest : ExecutorIntegrationTestBase() {
     @MethodSource("allCompletionModels")
     override fun integration_testExecuteStreaming(model: LLModel) {
         super.integration_testExecuteStreaming(model)
+    }
+
+    @ParameterizedTest
+    @MethodSource("allCompletionModels")
+    override fun integration_testExecuteStreamingWithTools(model: LLModel) {
+        super.integration_testExecuteStreamingWithTools(model)
     }
 
     @ParameterizedTest
@@ -298,5 +305,11 @@ class SingleLLMPromptExecutorIntegrationTest : ExecutorIntegrationTestBase() {
     @MethodSource("reasoningCapableModels")
     override fun integration_testReasoningWithEncryption(model: LLModel) {
         super.integration_testReasoningWithEncryption(model)
+    }
+
+    @ParameterizedTest
+    @MethodSource("reasoningCapableModels")
+    override fun integration_testReasoningMultiStep(model: LLModel) {
+        super.integration_testReasoningMultiStep(model)
     }
 }

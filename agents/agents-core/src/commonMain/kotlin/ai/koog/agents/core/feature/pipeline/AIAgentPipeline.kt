@@ -3,9 +3,9 @@ package ai.koog.agents.core.feature.pipeline
 import ai.koog.agents.core.agent.AIAgent
 import ai.koog.agents.core.agent.GraphAIAgent
 import ai.koog.agents.core.agent.context.AIAgentContext
-import ai.koog.agents.core.agent.context.AIAgentGraphContextBase
 import ai.koog.agents.core.agent.entity.AIAgentStorageKey
 import ai.koog.agents.core.agent.entity.AIAgentStrategy
+import ai.koog.agents.core.agent.execution.AgentExecutionInfo
 import ai.koog.agents.core.annotation.ExperimentalAgentsApi
 import ai.koog.agents.core.annotation.InternalAgentsApi
 import ai.koog.agents.core.environment.AIAgentEnvironment
@@ -53,9 +53,9 @@ import ai.koog.agents.core.feature.handler.tool.ToolCallResultHandler
 import ai.koog.agents.core.feature.handler.tool.ToolCallStartingContext
 import ai.koog.agents.core.feature.handler.tool.ToolValidationErrorHandler
 import ai.koog.agents.core.feature.handler.tool.ToolValidationFailedContext
+import ai.koog.agents.core.feature.model.AIAgentError
 import ai.koog.agents.core.system.getEnvironmentVariableOrNull
 import ai.koog.agents.core.system.getVMOptionOrNull
-import ai.koog.agents.core.tools.Tool
 import ai.koog.agents.core.tools.ToolDescriptor
 import ai.koog.prompt.dsl.ModerationResult
 import ai.koog.prompt.dsl.Prompt
@@ -64,6 +64,8 @@ import ai.koog.prompt.message.Message
 import ai.koog.prompt.streaming.StreamFrame
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.datetime.Clock
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlin.reflect.KClass
 import kotlin.reflect.KType
 import kotlin.reflect.safeCast
@@ -103,7 +105,7 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
      * @param featureConfig The feature configuration
      */
     @Suppress("RedundantVisibilityModifier") // have to put public here, explicitApi requires it
-    protected class RegisteredFeature(
+    private class RegisteredFeature(
         public val featureImpl: Any,
         public val featureConfig: FeatureConfig
     )
@@ -112,7 +114,7 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
      * Map of registered features and their configurations.
      * Keys are feature storage keys, values are feature configurations.
      */
-    protected val registeredFeatures: MutableMap<AIAgentStorageKey<*>, RegisteredFeature> = mutableMapOf()
+    private val registeredFeatures: MutableMap<AIAgentStorageKey<*>, RegisteredFeature> = mutableMapOf()
 
     /**
      * Set of system features that are always defined by the framework.
@@ -175,19 +177,63 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
             )
     }
 
+    protected fun <TConfig : FeatureConfig, TFeatureImpl : Any> install(
+        featureKey: AIAgentStorageKey<TFeatureImpl>,
+        featureConfig: TConfig,
+        featureImpl: TFeatureImpl,
+    ) {
+        registeredFeatures[featureKey] = RegisteredFeature(featureImpl, featureConfig)
+    }
+
+    protected suspend fun uninstall(
+        featureKey: AIAgentStorageKey<*>
+    ) {
+        registeredFeatures
+            .filter { (key, _) -> key == featureKey }
+            .forEach { (key, registeredFeature) ->
+                registeredFeature.featureConfig.messageProcessors.forEach { provider -> provider.close() }
+                registeredFeatures.remove(key)
+            }
+    }
+
     //region Internal Handlers
+
+    /**
+     * Prepares the feature by initializing all the associated message processors defined in the feature configuration.
+     *
+     * @param featureConfig The configuration object containing the list of message processors to be initialized.
+     */
+    internal suspend fun prepareFeature(featureConfig: FeatureConfig) {
+        featureConfig.messageProcessors.forEach { processor ->
+            logger.debug { "Start preparing processor: ${processor::class.simpleName}" }
+            processor.initialize()
+            logger.debug { "Finished preparing processor: ${processor::class.simpleName}" }
+        }
+    }
 
     /**
      * Prepares features by initializing their respective message processors.
      */
     internal suspend fun prepareFeatures() {
+        // Install system features (if exist)
         installFeaturesFromSystemConfig()
-        registeredFeatures.values.map { it.featureConfig }.forEach { featureConfig ->
-            featureConfig.messageProcessors.forEach { processor ->
-                logger.debug { "Start preparing processor: ${processor::class.simpleName}" }
-                processor.initialize()
-                logger.debug { "Finished preparing processor: ${processor::class.simpleName}" }
-            }
+
+        // Prepare features
+        registeredFeatures.values.forEach { featureConfig ->
+            prepareFeature(featureConfig.featureConfig)
+        }
+    }
+
+    /**
+     * Closes all message processors associated with the provided feature by feature configuration.
+     *
+     * @param featureConfig The configuration object containing the message processors to be closed.
+     */
+    internal suspend fun closeFeatureMessageProcessors(featureConfig: FeatureConfig) {
+        featureConfig.messageProcessors.forEach { provider ->
+            logger.trace { "Start closing feature processor: ${featureConfig::class.simpleName}" }
+            provider.close()
+            logger.trace { "Finished closing feature processor: ${featureConfig::class.simpleName}" }
         }
     }
 
@@ -197,11 +243,9 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
      * This internal method properly shuts down all message processors of registered features,
      * ensuring resources are released appropriately.
      */
-    internal suspend fun closeFeaturesStreamProviders() {
-        registeredFeatures.values.map { it.featureConfig }.forEach { config ->
-            config.messageProcessors.forEach { provider ->
-                provider.close()
-            }
+    internal suspend fun closeAllFeaturesMessageProcessors() {
+        registeredFeatures.values.forEach { registerFeature ->
+            closeFeatureMessageProcessors(registerFeature.featureConfig)
         }
     }
 
@@ -212,17 +256,21 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
     /**
      * Notifies all registered handlers that an agent has started execution.
      *
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the agent environment transformation event
      * @param runId The unique identifier for the agent run
      * @param agent The agent instance for which the execution has started
      * @param context The context of the agent execution, providing access to the agent environment and context features
      */
     @OptIn(InternalAgentsApi::class)
     public suspend fun <TInput, TOutput> onAgentStarting(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         runId: String,
         agent: AIAgent<*, *>,
         context: AIAgentContext
     ) {
-        val eventContext = AgentStartingContext(agent, runId, context)
+        val eventContext = AgentStartingContext(eventId, executionInfo, agent, runId, context)
         agentEventHandlers.values.forEach { handler ->
             handler.handleAgentStarting(eventContext)
         }
@@ -231,44 +279,56 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
     /**
      * Notifies all registered handlers that an agent has finished execution.
      *
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the agent environment transformation event
      * @param agentId The unique identifier of the agent that finished execution
      * @param runId The unique identifier of the agent run
      * @param result The result produced by the agent, or null if no result was produced
      */
     public suspend fun onAgentCompleted(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         agentId: String,
         runId: String,
         result: Any?
     ) {
-        val eventContext = AgentCompletedContext(agentId = agentId, runId = runId, result = result)
+        val eventContext = AgentCompletedContext(eventId, executionInfo, agentId, runId, result)
         agentEventHandlers.values.forEach { handler -> handler.agentCompletedHandler.handle(eventContext) }
     }
 
     /**
      * Notifies all registered handlers about an error that occurred during agent execution.
      *
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the agent environment transformation event
      * @param agentId The unique identifier of the agent that encountered the error
      * @param runId The unique identifier of the agent run
-     * @param throwable The exception that was thrown during agent execution
+     * @param throwable The [Throwable] exception instance that was thrown during agent execution
      */
     public suspend fun onAgentExecutionFailed(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         agentId: String,
         runId: String,
         throwable: Throwable
     ) {
-        val eventContext = AgentExecutionFailedContext(agentId = agentId, runId = runId, throwable = throwable)
+        val eventContext = AgentExecutionFailedContext(eventId, executionInfo, agentId, runId, throwable)
         agentEventHandlers.values.forEach { handler -> handler.agentExecutionFailedHandler.handle(eventContext) }
     }
 
     /**
      * Invoked before an agent is closed to perform necessary pre-closure operations.
      *
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the agent environment transformation event
      * @param agentId The unique identifier of the agent that will be closed.
      */
     public suspend fun onAgentClosing(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         agentId: String
     ) {
-        val eventContext = AgentClosingContext(agentId = agentId)
+        val eventContext = AgentClosingContext(eventId, executionInfo, agentId)
         agentEventHandlers.values.forEach { handler -> handler.agentClosingHandler.handle(eventContext) }
     }
 
@@ -278,17 +338,19 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
      * This method allows features to modify or enhance the agent's environment before it starts execution.
      * Each registered handler can apply its own transformations to the environment in sequence.
      *
-     * @param strategy The strategy associated with the agent
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the agent environment transformation event
      * @param agent The agent instance for which the environment is being transformed
      * @param baseEnvironment The initial environment to be transformed
      * @return The transformed environment after all handlers have been applied
      */
     public suspend fun onAgentEnvironmentTransforming(
-        strategy: AIAgentStrategy<*, *, AIAgentGraphContextBase>,
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         agent: GraphAIAgent<*, *>,
         baseEnvironment: AIAgentEnvironment
     ): AIAgentEnvironment {
-        val eventContext = AgentEnvironmentTransformingContext(strategy = strategy, agent = agent)
+        val eventContext = AgentEnvironmentTransformingContext(eventId, executionInfo, agent)
         return agentEventHandlers.values.fold(baseEnvironment) { environment, handler ->
             handler.transformEnvironment(eventContext, environment)
         }
@@ -301,30 +363,42 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
     /**
      * Notifies all registered strategy handlers that a strategy has started execution.
      *
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the strategy event
      * @param strategy The strategy that has started execution
      * @param context The context of the strategy execution
      */
     @OptIn(InternalAgentsApi::class)
-    public suspend fun onStrategyStarting(strategy: AIAgentStrategy<*, *, *>, context: AIAgentContext) {
-        val eventContext = StrategyStartingContext(strategy, context)
+    public suspend fun onStrategyStarting(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
+        strategy: AIAgentStrategy<*, *, *>,
+        context: AIAgentContext
+    ) {
+        val eventContext = StrategyStartingContext(eventId, executionInfo, strategy, context)
         strategyEventHandlers.values.forEach { handler -> handler.handleStrategyStarting(eventContext) }
     }
 
     /**
      * Notifies all registered strategy handlers that a strategy has finished execution.
      *
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the strategy event
      * @param strategy The strategy that has finished execution
      * @param context The context of the strategy execution
      * @param result The result produced by the strategy execution
      */
     @OptIn(InternalAgentsApi::class)
     public suspend fun onStrategyCompleted(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         strategy: AIAgentStrategy<*, *, *>,
         context: AIAgentContext,
         result: Any?,
         resultType: KType,
     ) {
-        val eventContext = StrategyCompletedContext(strategy, context, result, resultType,)
+        val eventContext =
+            StrategyCompletedContext(eventId, executionInfo, strategy, context, result, resultType)
         strategyEventHandlers.values.forEach { handler -> handler.handleStrategyCompleted(eventContext) }
     }
 
@@ -335,37 +409,48 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
     /**
      * Notifies all registered LLM handlers before a language model call is made.
      *
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the LLM call event
      * @param runId The unique identifier for the current run.
-     * @param callId The unique identifier for the LLM call
      * @param prompt The prompt that will be sent to the language model
-     * @param tools The list of tool descriptors available for the LLM call
      * @param model The language model instance that will process the request
+     * @param tools The list of tool descriptors available for the LLM call
      */
-    public suspend fun onLLMCallStarting(runId: String, callId: String, prompt: Prompt, model: LLModel, tools: List<ToolDescriptor>) {
-        val eventContext = LLMCallStartingContext(runId, callId, prompt, model, tools)
+    public suspend fun onLLMCallStarting(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
+        runId: String,
+        prompt: Prompt,
+        model: LLModel,
+        tools: List<ToolDescriptor>
+    ) {
+        val eventContext = LLMCallStartingContext(eventId, executionInfo, runId, prompt, model, tools)
         llmCallEventHandlers.values.forEach { handler -> handler.llmCallStartingHandler.handle(eventContext) }
     }
 
     /**
      * Notifies all registered LLM handlers after a language model call has completed.
      *
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the LLM call event
      * @param runId Identifier for the current run.
-     * @param callId Identifier for the current LLM call.
      * @param prompt The prompt that was sent to the language model
-     * @param tools The list of tool descriptors that were available for the LLM call
      * @param model The language model instance that processed the request
+     * @param tools The list of tool descriptors that were available for the LLM call
      * @param responses The response messages received from the language model
+     * @param moderationResponse The moderation response, if any, received from the language model
      */
     public suspend fun onLLMCallCompleted(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         runId: String,
-        callId: String,
         prompt: Prompt,
         model: LLModel,
         tools: List<ToolDescriptor>,
         responses: List<Message.Response>,
         moderationResponse: ModerationResult? = null,
     ) {
-        val eventContext = LLMCallCompletedContext(runId, callId, prompt, model, tools, responses, moderationResponse)
+        val eventContext = LLMCallCompletedContext(eventId, executionInfo, runId, prompt, model, tools, responses, moderationResponse)
         llmCallEventHandlers.values.forEach { handler -> handler.llmCallCompletedHandler.handle(eventContext) }
     }
 
@@ -376,72 +461,107 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
     /**
      * Notifies all registered tool handlers when a tool is called.
      *
+     * @param eventId The unique identifier for the current event.
+     * @param executionInfo The execution information for the tool call event
      * @param runId The unique identifier for the current run.
      * @param toolCallId The unique identifier for the current tool call.
-     * @param tool The tool that is being called
+     * @param toolName The tool name that is being called
+     * @param toolDescription The description of the tool that is being called.
      * @param toolArgs The arguments provided to the tool
      */
-    public suspend fun onToolCallStarting(runId: String, toolCallId: String?, tool: Tool<*, *>, toolArgs: Any?) {
-        val eventContext = ToolCallStartingContext(runId, toolCallId, tool, toolArgs)
+    public suspend fun onToolCallStarting(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
+        runId: String,
+        toolCallId: String?,
+        toolName: String,
+        toolDescription: String?,
+        toolArgs: JsonObject,
+    ) {
+        val eventContext =
+            ToolCallStartingContext(eventId, executionInfo, runId, toolCallId, toolName, toolDescription, toolArgs)
         toolCallEventHandlers.values.forEach { handler -> handler.toolCallHandler.handle(eventContext) }
     }
 
     /**
      * Notifies all registered tool handlers when a validation error occurs during a tool call.
      *
-     * @param runId The unique identifier for the current run.
-     * @param tool The tool for which validation failed
-     * @param toolArgs The arguments that failed validation
-     * @param error The validation error message
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the tool call event;
+     * @param runId The unique identifier for the current run;
+     * @param toolCallId The unique identifier for the current tool call;
+     * @param toolName The name of the tool for which validation failed;
+     * @param toolDescription The description of the tool that was called;
+     * @param toolArgs The arguments that failed validation;
+     * @param message The validation error message;
+     * @param error The [AIAgentError] validation error.
      */
     public suspend fun onToolValidationFailed(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         runId: String,
         toolCallId: String?,
-        tool: Tool<*, *>,
-        toolArgs: Any?,
-        error: String
+        toolName: String,
+        toolDescription: String?,
+        toolArgs: JsonObject,
+        message: String,
+        error: AIAgentError,
     ) {
-        val eventContext = ToolValidationFailedContext(runId, toolCallId, tool, toolArgs, error)
+        val eventContext = ToolValidationFailedContext(eventId, executionInfo, runId, toolCallId, toolName, toolDescription, toolArgs, message, error)
         toolCallEventHandlers.values.forEach { handler -> handler.toolValidationErrorHandler.handle(eventContext) }
     }
 
     /**
      * Notifies all registered tool handlers when a tool call fails with an exception.
      *
-     * @param runId The unique identifier for the current run.
-     * @param toolCallId The unique identifier for the current tool call.
-     * @param tool The tool that failed
-     * @param toolArgs The arguments provided to the tool
-     * @param throwable The exception that caused the failure
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the tool call agent event
+     * @param runId The unique identifier for the current run;
+     * @param toolCallId The unique identifier for the current tool call;
+     * @param toolName The tool name that was called;
+     * @param toolDescription The description of the tool that was called;
+     * @param toolArgs The arguments provided to the tool;
+     * @param message A message describing the failure.
+     * @param error The [AIAgentError] that caused the failure.
      */
     public suspend fun onToolCallFailed(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         runId: String,
         toolCallId: String?,
-        tool: Tool<*, *>,
-        toolArgs: Any?,
-        throwable: Throwable
+        toolName: String,
+        toolDescription: String?,
+        toolArgs: JsonObject,
+        message: String,
+        error: AIAgentError?
     ) {
-        val eventContext = ToolCallFailedContext(runId, toolCallId, tool, toolArgs, throwable)
+        val eventContext = ToolCallFailedContext(eventId, executionInfo, runId, toolCallId, toolName, toolDescription, toolArgs, message, error)
         toolCallEventHandlers.values.forEach { handler -> handler.toolCallFailureHandler.handle(eventContext) }
     }
 
     /**
      * Notifies all registered tool handlers about the result of a tool call.
      *
-     * @param runId The unique identifier for the current run.
-     * @param toolCallId The unique identifier for the current tool call.
-     * @param tool The tool that was called
-     * @param toolArgs The arguments that were provided to the tool
-     * @param result The result produced by the tool, or null if no result was produced
+     * @param eventId The unique identifier for the event group.
+     * @param executionInfo The execution information for the tool call agent event
+     * @param runId The unique identifier for the current run;
+     * @param toolCallId The unique identifier for the current tool call;
+     * @param toolName The tool name that was called;
+     * @param toolDescription The description of the tool that was called;
+     * @param toolArgs The arguments that were provided to the tool;
+     * @param toolResult The result produced by the tool, or null if no result was produced.
      */
     public suspend fun onToolCallCompleted(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         runId: String,
         toolCallId: String?,
-        tool: Tool<*, *>,
-        toolArgs: Any?,
-        result: Any?
+        toolName: String,
+        toolDescription: String?,
+        toolArgs: JsonObject,
+        toolResult: JsonElement?
     ) {
-        val eventContext = ToolCallCompletedContext(runId, toolCallId, tool, toolArgs, result)
+        val eventContext = ToolCallCompletedContext(eventId, executionInfo, runId, toolCallId, toolName, toolDescription, toolArgs, toolResult)
         toolCallEventHandlers.values.forEach { handler -> handler.toolCallResultHandler.handle(eventContext) }
     }
 
@@ -455,20 +575,22 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
      * This method notifies all registered stream handlers that streaming is about to start,
      * allowing them to perform preprocessing or logging operations.
      *
-     * @param runId The unique identifier for this streaming session
-     * @param callId The unique identifier for this LLM call
-     * @param prompt The prompt being sent to the language model
-     * @param model The language model being used for streaming
-     * @param tools The list of available tool descriptors for this streaming session
+     * @param eventId The unique identifier for the event group;
+     * @param executionInfo The execution information for the LLM streaming event;
+     * @param runId The unique identifier for this streaming session;
+     * @param prompt The prompt being sent to the language model;
+     * @param model The language model being used for streaming;
+     * @param tools The list of available tool descriptors for this streaming session.
      */
     public suspend fun onLLMStreamingStarting(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         runId: String,
-        callId: String,
         prompt: Prompt,
         model: LLModel,
         tools: List<ToolDescriptor>
     ) {
-        val eventContext = LLMStreamingStartingContext(runId, callId, prompt, model, tools)
+        val eventContext = LLMStreamingStartingContext(eventId, executionInfo, runId, prompt, model, tools)
         llmStreamingEventHandlers.values.forEach { handler -> handler.llmStreamingStartingHandler.handle(eventContext) }
     }
 
@@ -478,12 +600,22 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
      * This method notifies all registered stream handlers about each incoming stream frame,
      * allowing them to process, transform, or aggregate the streaming content in real-time.
      *
-     * @param runId The unique identifier for this streaming session
-     * @param callId The unique identifier for this LLM call
-     * @param streamFrame The individual stream frame containing partial response data
+     * @param eventId The unique identifier for the event group;
+     * @param executionInfo The execution information for the LLM streaming event;
+     * @param runId The unique identifier for this streaming session;
+     * @param prompt The prompt being sent to the language model;
+     * @param model The language model being used for streaming;
+     * @param streamFrame The individual stream frame containing partial response data.
      */
-    public suspend fun onLLMStreamingFrameReceived(runId: String, callId: String, streamFrame: StreamFrame) {
-        val eventContext = LLMStreamingFrameReceivedContext(runId, callId, streamFrame)
+    public suspend fun onLLMStreamingFrameReceived(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
+        runId: String,
+        prompt: Prompt,
+        model: LLModel,
+        streamFrame: StreamFrame
+    ) {
+        val eventContext = LLMStreamingFrameReceivedContext(eventId, executionInfo, runId, prompt, model, streamFrame)
         llmStreamingEventHandlers.values.forEach { handler -> handler.llmStreamingFrameReceivedHandler.handle(eventContext) }
     }
 
@@ -493,12 +625,22 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
      * This method notifies all registered stream handlers about the streaming error,
      * allowing them to handle or log the error.
      *
-     * @param runId The unique identifier for this streaming session
-     * @param callId The unique identifier for this LLM call
-     * @param throwable The exception that occurred during streaming, if applicable
+     * @param eventId The unique identifier for the event group;
+     * @param executionInfo The execution information for the LLM streaming event;
+     * @param runId The unique identifier for this streaming session;
+     * @param prompt The prompt being sent to the language model;
+     * @param model The language model being used for streaming;
+     * @param throwable The exception that occurred during streaming if applicable.
      */
-    public suspend fun onLLMStreamingFailed(runId: String, callId: String, throwable: Throwable) {
-        val eventContext = LLMStreamingFailedContext(runId, callId, throwable)
+    public suspend fun onLLMStreamingFailed(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
+        runId: String,
+        prompt: Prompt,
+        model: LLModel,
+        throwable: Throwable
+    ) {
+        val eventContext = LLMStreamingFailedContext(eventId, executionInfo, runId, prompt, model, throwable)
         llmStreamingEventHandlers.values.forEach { handler -> handler.llmStreamingFailedHandler.handle(eventContext) }
     }
 
@@ -508,20 +650,22 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
      * This method notifies all registered stream handlers that streaming has finished,
      * allowing them to perform post-processing, cleanup, or final logging operations.
      *
-     * @param runId The unique identifier for this streaming session
-     * @param callId The unique identifier for this LLM call
-     * @param prompt The prompt that was sent to the language model
-     * @param model The language model that was used for streaming
-     * @param tools The list of tool descriptors that were available for this streaming session
+     * @param eventId The unique identifier for the event group;
+     * @param executionInfo The execution information for the LLM streaming event;
+     * @param runId The unique identifier for this streaming session;
+     * @param prompt The prompt that was sent to the language model;
+     * @param model The language model that was used for streaming;
+     * @param tools The list of tool descriptors that were available for this streaming session.
      */
     public suspend fun onLLMStreamingCompleted(
+        eventId: String,
+        executionInfo: AgentExecutionInfo,
         runId: String,
-        callId: String,
         prompt: Prompt,
         model: LLModel,
         tools: List<ToolDescriptor>
     ) {
-        val eventContext = LLMStreamingCompletedContext(runId, callId, prompt, model, tools)
+        val eventContext = LLMStreamingCompletedContext(eventId, executionInfo, runId, prompt, model, tools)
         llmStreamingEventHandlers.values.forEach { handler -> handler.llmStreamingCompletedHandler.handle(eventContext) }
     }
 
@@ -1180,23 +1324,53 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
     //region Private Methods
 
     private fun installFeaturesFromSystemConfig() {
-        // Read features from system variables
-        val featuresFromSystemConfig = buildList {
-            @OptIn(ExperimentalAgentsApi::class)
-            getEnvironmentVariableOrNull(FeatureSystemVariables.KOOG_FEATURES_ENV_VAR_NAME)
-                ?.let { featuresString ->
-                    featuresString.split(",").forEach { add(it.trim()) }
-                }
+        val featuresFromSystemConfig = readFeatureKeysFromSystemVariables()
+        val filteredSystemFeaturesToInstall = filterSystemFeaturesToInstall(featuresFromSystemConfig)
 
-            @OptIn(ExperimentalAgentsApi::class)
-            getVMOptionOrNull(FeatureSystemVariables.KOOG_FEATURES_VM_OPTION_NAME)
-                ?.let { featuresString ->
-                    featuresString.split(",").forEach { add(it.trim()) }
-                }
+        filteredSystemFeaturesToInstall.forEach { systemFeatureKey ->
+            installSystemFeature(systemFeatureKey)
         }
+    }
+
+    /**
+     * Read feature keys from system variables.
+     *
+     * @return List of feature keys as a string.
+     *         For example, ["debugger", "tracing"]
+     */
+    private fun readFeatureKeysFromSystemVariables(): List<String> {
+        val collectedFeaturesKeys = mutableListOf<String>()
+
+        @OptIn(ExperimentalAgentsApi::class)
+        getEnvironmentVariableOrNull(FeatureSystemVariables.KOOG_FEATURES_ENV_VAR_NAME)
+            ?.let { featuresString ->
+                featuresString.split(",").forEach { featureString ->
+                    collectedFeaturesKeys.add(featureString.trim())
+                }
+            }
+
+        @OptIn(ExperimentalAgentsApi::class)
+        getVMOptionOrNull(FeatureSystemVariables.KOOG_FEATURES_VM_OPTION_NAME)
+            ?.let { featuresString ->
+                featuresString.split(",").forEach { featureString ->
+                    collectedFeaturesKeys.add(featureString.trim())
+                }
+            }
+
+        return collectedFeaturesKeys.toList()
+    }
+
+    /**
+     * Filter system features to install based on the provided feature keys.
+     *
+     * @return List of [AIAgentStorageKey]s with filtered system features to install.
+     *         For example, [AIAgentStorageKey("debugger")]
+     */
+    private fun filterSystemFeaturesToInstall(featureKeys: List<String>): List<AIAgentStorageKey<*>> {
+        val filteredSystemFeaturesToInstall = mutableListOf<AIAgentStorageKey<*>>()
 
         // Check config features exist in the system features list
-        featuresFromSystemConfig.forEach { configFeatureKey ->
+        featureKeys.forEach { configFeatureKey ->
             val systemFeatureKey = systemFeatures.find { systemFeature -> systemFeature.name == configFeatureKey }
 
             // Check requested feature is in the known system features list
@@ -1208,7 +1382,7 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
                 return@forEach
             }
 
-            // Ignore system features if installed by a user
+            // Ignore system features if already installed by a user
             if (registeredFeatures.keys.any { registerFeatureKey -> registerFeatureKey.name == configFeatureKey }) {
                 logger.debug {
                     "Feature with key '$configFeatureKey' has already been registered. " +
@@ -1217,9 +1391,10 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
                 return@forEach
             }
 
-            // Install the requested system feature from config
-            installSystemFeature(systemFeatureKey)
+            filteredSystemFeaturesToInstall.add(systemFeatureKey)
         }
+
+        return filteredSystemFeaturesToInstall.toList()
     }
 
     @OptIn(ExperimentalAgentsApi::class)
@@ -1233,6 +1408,7 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
                             // Use default configuration
                         }
                     }
+
                     is AIAgentFunctionalPipeline -> {
                         this.install(Debugger) {
                             // Use default configuration
@@ -1240,6 +1416,7 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
                     }
                 }
             }
+
             else -> {
                 error(
                     "Unsupported system feature key: ${featureKey.name}. " +
@@ -1250,9 +1427,9 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
         }
     }
 
-    protected inline fun <TContext : AgentLifecycleEventContext> createConditionalHandler(
+    protected fun <TContext : AgentLifecycleEventContext> createConditionalHandler(
         feature: AIAgentFeature<*, *>,
-        crossinline handle: suspend (TContext) -> Unit
+        handle: suspend (TContext) -> Unit
     ): suspend (TContext) -> Unit = handler@{ eventContext ->
         val featureConfig = registeredFeatures[feature.key]?.featureConfig
 
@@ -1263,9 +1440,9 @@ public abstract class AIAgentPipeline(public val clock: Clock) {
         handle(eventContext)
     }
 
-    protected inline fun createConditionalHandler(
+    protected fun createConditionalHandler(
         feature: AIAgentFeature<*, *>,
-        crossinline handle: suspend AgentEnvironmentTransformingContext.(AIAgentEnvironment) -> AIAgentEnvironment
+        handle: suspend AgentEnvironmentTransformingContext.(AIAgentEnvironment) -> AIAgentEnvironment
     ): suspend (AgentEnvironmentTransformingContext, AIAgentEnvironment) -> AIAgentEnvironment =
         handler@{ eventContext, env ->
             val featureConfig = registeredFeatures[feature.key]?.featureConfig

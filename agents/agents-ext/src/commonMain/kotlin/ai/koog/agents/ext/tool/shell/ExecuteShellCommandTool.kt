@@ -2,7 +2,6 @@ package ai.koog.agents.ext.tool.shell
 
 import ai.koog.agents.core.tools.Tool
 import ai.koog.agents.core.tools.annotations.LLMDescription
-import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -18,7 +17,17 @@ import kotlin.coroutines.cancellation.CancellationException
 public class ExecuteShellCommandTool(
     private val executor: ShellCommandExecutor,
     private val confirmationHandler: ShellCommandConfirmationHandler
-) : Tool<ExecuteShellCommandTool.Args, ExecuteShellCommandTool.Result>() {
+) : Tool<ExecuteShellCommandTool.Args, ExecuteShellCommandTool.Result>(
+    argsSerializer = Args.serializer(),
+    resultSerializer = Result.serializer(),
+    name = "__execute_shell_command__",
+    description = """
+        Executes a shell command.
+        Depending on configuration, the command may run immediately or ask the user before running.
+        A working directory and timeout can be provided. If a timeout is reached, any available output is included.
+        Returns everything the command printed and the exit code, or a message if it was not run or did not finish.
+    """.trimIndent()
+) {
 
     /**
      * Parameters for running a shell command.
@@ -62,39 +71,7 @@ public class ExecuteShellCommandTool(
         val command: String,
         val exitCode: Int?,
         val output: String
-    ) {
-        /**
-         * Formats this result like a terminal session.
-         *
-         * Returns a multi-line string showing:
-         * - The command that was run
-         * - Everything it printed, or "(no output)" if the command succeeded but printed nothing
-         * - The exit code (omitted if the command was denied or timed out)
-         *
-         * @return Formatted string ready for display or logging
-         */
-        public fun textForLLM(): String = buildString {
-            appendLine("Command: $command")
-            if (output.isNotEmpty()) {
-                appendLine(output)
-            } else if (exitCode != null) {
-                appendLine("(no output)")
-            }
-            exitCode?.let {
-                appendLine("Exit code: $it")
-            }
-        }.trimEnd()
-    }
-
-    override val argsSerializer: KSerializer<Args> = Args.serializer()
-    override val resultSerializer: KSerializer<Result> = Result.serializer()
-    override val name: String = "__execute_shell_command__"
-    override val description: String = """
-        Executes a shell command.  
-        Depending on configuration, the command may run immediately or ask the user before running.  
-        A working directory and timeout can be provided. If a timeout is reached, any available output is included.  
-        Returns everything the command printed and the exit code, or a message if it was not run or did not finish.
-    """.trimIndent()
+    )
 
     /**
      * Runs a command after asking the user for permission.
@@ -121,5 +98,19 @@ public class ExecuteShellCommandTool(
 
         is ShellCommandConfirmation.Denied ->
             Result(args.command, null, "Command execution denied with user response: ${confirmation.userResponse}")
+    }
+
+    override fun encodeResultToString(result: Result): String = with(result) {
+        buildString {
+            appendLine("Command: $command")
+            if (output.isNotEmpty()) {
+                appendLine(output)
+            } else if (exitCode != null) {
+                appendLine("(no output)")
+            }
+            exitCode?.let {
+                appendLine("Exit code: $it")
+            }
+        }.trimEnd()
     }
 }

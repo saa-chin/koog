@@ -14,6 +14,7 @@ import ai.koog.prompt.executor.model.PromptExecutor
 import ai.koog.prompt.llm.LLModel
 import ai.koog.prompt.message.Message
 import ai.koog.prompt.params.LLMParams
+import ai.koog.prompt.processor.ResponseProcessor
 import ai.koog.prompt.streaming.StreamFrame
 import ai.koog.prompt.structure.StructureDefinition
 import ai.koog.prompt.structure.StructureFixingParser
@@ -44,39 +45,14 @@ public class AIAgentLLMWriteSession internal constructor(
     @PublishedApi internal val toolRegistry: ToolRegistry,
     prompt: Prompt,
     model: LLModel,
+    responseProcessor: ResponseProcessor?,
     config: AIAgentConfig,
     public val clock: Clock
-) : AIAgentLLMSession(executor, tools, prompt, model, config) {
-    /**
-     * Represents the prompt object used within the session. The prompt can be accessed or
-     * modified only when the session is in an active state, as determined by the `isActive` predicate.
-     *
-     * This property uses the [ActiveProperty] delegate to enforce the validation of the session's
-     * active state before any read or write operations.
-     */
+) : AIAgentLLMSession(executor, tools, prompt, model, responseProcessor, config) {
     override var prompt: Prompt by ActiveProperty(prompt) { isActive }
-
-    /**
-     * Represents a collection of tools that are available for the session.
-     * The tools can be accessed or modified only if the session is in an active state.
-     *
-     * This property uses an [ActiveProperty] delegate to enforce the session's active state
-     * as a prerequisite for accessing or mutating the tools list.
-     *
-     * The list contains tool descriptors, which define the tools' metadata, such as their
-     * names, descriptions, and parameter requirements.
-     */
     override var tools: List<ToolDescriptor> by ActiveProperty(tools) { isActive }
-
-    /**
-     * Represents an override property `model` of type [LLModel].
-     * This property is backed by an `ActiveProperty`, which ensures the property value is dynamically updated
-     * based on the active state determined by the `isActive` parameter.
-     *
-     * This implementation allows for reactive behavior, ensuring that the `model` value is updated or resolved
-     * only when the `isActive` condition changes.
-     */
     override var model: LLModel by ActiveProperty(model) { isActive }
+    override var responseProcessor: ResponseProcessor? by ActiveProperty(responseProcessor) { isActive }
 
     /**
      * Executes the specified tool with the given arguments and returns the result within a [SafeTool.Result] wrapper.
@@ -366,6 +342,18 @@ public class AIAgentLLMWriteSession internal constructor(
     }
 
     /**
+     * Sends a request to the language model without utilizing any tools, returns multiple responses,
+     * and updates the prompt with the received messages.
+     *
+     * @return A list of response messages from the language model.
+     */
+    override suspend fun requestLLMMultipleWithoutTools(): List<Message.Response> {
+        return super.requestLLMMultipleWithoutTools().also { responses ->
+            appendPrompt { messages(responses) }
+        }
+    }
+
+    /**
      * Sends a request to the Language Model (LLM) without including any tools, processes the response,
      * and updates the prompt with the returned message.
      *
@@ -378,13 +366,17 @@ public class AIAgentLLMWriteSession internal constructor(
     }
 
     /**
-     * Requests a response from the Language Learning Model (LLM) while also processing
-     * the response by updating the current prompt with the received message.
+     * Requests a response from the Language Model (LLM) enforcing tool usage (`ToolChoice.Required`),
+     * validates the session, and processes all returned messages (e.g. thinking + tool call).
      *
-     * @return The response received from the Language Learning Model (LLM).
+     * Crucially, this method appends **all** received messages to the prompt history to preserve context.
+     *
+     * @return A list of responses received from the Language Model (LLM).
      */
-    override suspend fun requestLLMOnlyCallingTools(): Message.Response {
-        return super.requestLLMOnlyCallingTools().also { response -> appendPrompt { message(response) } }
+    override suspend fun requestLLMMultipleOnlyCallingTools(): List<Message.Response> {
+        return super.requestLLMMultipleOnlyCallingTools().also { responses ->
+            appendPrompt { messages(responses) }
+        }
     }
 
     /**
@@ -415,9 +407,7 @@ public class AIAgentLLMWriteSession internal constructor(
      * @return A [Message.Response] object containing the response from the LLM.
      */
     override suspend fun requestLLM(): Message.Response {
-        return super.requestLLM().also { response ->
-            appendPrompt { message(response) }
-        }
+        return super.requestLLM().also { response -> appendPrompt { message(response) } }
     }
 
     /**
@@ -431,9 +421,7 @@ public class AIAgentLLMWriteSession internal constructor(
      */
     override suspend fun requestLLMMultiple(): List<Message.Response> {
         return super.requestLLMMultiple().also { responses ->
-            appendPrompt {
-                responses.forEach { message(it) }
-            }
+            appendPrompt { messages(responses) }
         }
     }
 

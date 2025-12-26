@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Assumptions
 * */
 object RetryUtils {
     private const val GOOGLE_429_ERROR = "Error from GoogleAI API: 429 Too Many Requests"
+    private const val GOOGLE_RESOURCE_EXHAUSTED =
+        "You exceeded your current quota, please check your plan and billing details"
     private const val GOOGLE_500_ERROR = "Error from GoogleAI API: 500 Internal Server Error"
     private const val GOOGLE_503_ERROR = "Error from GoogleAI API: 503 Service Unavailable"
     private const val ANTHROPIC_429_ERROR = "Error from Anthropic API: 429 Too Many Requests"
@@ -25,9 +27,13 @@ object RetryUtils {
     private const val OPEN_ROUTER_PARTS_ERROR =
         "Field 'id' is required for type with serial name 'ai.koog.prompt.executor.clients.openai.base.models.OpenAIToolCall', but it was missing at path:"
 
+    // External image URL download failures are third-party service issues
+    private const val OPENAI_IMAGE_DOWNLOAD_ERROR = "Error while downloading"
+
     private fun isThirdPartyError(e: Throwable): Boolean {
         val errorMessages = listOf(
             GOOGLE_429_ERROR,
+            GOOGLE_RESOURCE_EXHAUSTED,
             GOOGLE_500_ERROR,
             GOOGLE_503_ERROR,
             ANTHROPIC_429_ERROR,
@@ -37,6 +43,7 @@ object RetryUtils {
             OPENAI_500_ERROR,
             OPENAI_503_ERROR,
             OPENAI_LLM_CLIENT_500_ERROR,
+            OPENAI_IMAGE_DOWNLOAD_ERROR,
         )
 
         val message = e.message

@@ -138,6 +138,42 @@ public object OpenRouterModels : LLModelDefinitions {
     )
 
     /**
+     * Claude Haiku 4.5 is Anthropic’s fastest and most efficient model,
+     * delivering near-frontier intelligence at a fraction of the cost and latency of larger Claude models.
+     */
+    public val Claude4_5Haiku: LLModel = LLModel(
+        provider = LLMProvider.OpenRouter,
+        id = "anthropic/claude-haiku-4.5",
+        capabilities = multimodalCapabilities + additionalCapabilities,
+        contextLength = 200_000,
+        maxOutputTokens = 64_000,
+    )
+
+    /**
+     * Claude Sonnet 4.5 is Anthropic’s most advanced Sonnet model to date, optimized for real-world agents
+     * and coding workflows.
+     */
+    public val Claude4_5Sonnet: LLModel = LLModel(
+        provider = LLMProvider.OpenRouter,
+        id = "anthropic/claude-sonnet-4.5",
+        capabilities = multimodalCapabilities + additionalCapabilities,
+        contextLength = 1_000_000,
+        maxOutputTokens = 64_000,
+    )
+
+    /**
+     * Claude Opus 4.5 is Anthropic’s frontier reasoning model optimized for complex software engineering,
+     * agentic workflows, and long-horizon computer use.
+     */
+    public val Claude4_5Opus: LLModel = LLModel(
+        provider = LLMProvider.OpenRouter,
+        id = "anthropic/claude-opus-4.5",
+        capabilities = multimodalCapabilities + additionalCapabilities,
+        contextLength = 200_000,
+        maxOutputTokens = 32_000,
+    )
+
+    /**
      * Represents the GPT-4o-mini model hosted on OpenRouter.
      *
      * It leverages a standard set of capabilities for interaction.
@@ -269,6 +305,30 @@ public object OpenRouterModels : LLModelDefinitions {
         id = "openai/gpt-3.5-turbo",
         capabilities = standardCapabilities + additionalCapabilities,
         contextLength = 16_385,
+    )
+
+    /**
+     * GPT-5.2 is offering stronger agentic and long context performance compared to GPT-5.1.
+     * It uses adaptive reasoning to allocate computation dynamically, responding quickly to simple queries
+     * while spending more depth on complex tasks.
+     */
+    public val GPT5_2: LLModel = LLModel(
+        provider = LLMProvider.OpenRouter,
+        id = "openai/gpt-5.2",
+        capabilities = multimodalCapabilities + additionalCapabilities,
+        contextLength = 400_000,
+    )
+
+    /**
+     * GPT-5.2 Pro is offering major improvements in agentic coding and long context performance over GPT-5 Pro.
+     * It is optimized for complex tasks that require step-by-step reasoning, instruction following,
+     * and accuracy in high-stakes use cases.
+     */
+    public val GPT5_2Pro: LLModel = LLModel(
+        provider = LLMProvider.OpenRouter,
+        id = "openai/gpt-5.2-pro",
+        capabilities = multimodalCapabilities + LLMCapability.ToolChoice,
+        contextLength = 400_000,
     )
 
     /**
@@ -429,8 +489,21 @@ public object OpenRouterModels : LLModelDefinitions {
     public val Qwen2_5: LLModel = LLModel(
         provider = LLMProvider.OpenRouter,
         id = "qwen/qwen-2.5-72b-instruct",
-        capabilities = standardCapabilities,
+        capabilities = standardCapabilities + additionalCapabilities,
         contextLength = 131_072,
         maxOutputTokens = 8_192,
+    )
+
+    /**
+     * Qwen 3 model with 8B parameters from Alibaba.
+     * Multimodal vision-language model from the Qwen3-VL series, built for high-fidelity understanding
+     * and reasoning across text, images, and video.
+     */
+    public val Qwen3VL: LLModel = LLModel(
+        provider = LLMProvider.OpenRouter,
+        id = "qwen/qwen3-vl-8b-instruct",
+        capabilities = multimodalCapabilities + additionalCapabilities,
+        contextLength = 131_072,
+        maxOutputTokens = 33_000,
     )
 }

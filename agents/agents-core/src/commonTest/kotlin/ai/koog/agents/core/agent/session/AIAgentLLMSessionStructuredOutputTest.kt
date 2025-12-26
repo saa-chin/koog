@@ -48,7 +48,8 @@ class AIAgentLLMSessionStructuredOutputTest : AgentTestBase() {
         val llmContext = AIAgentLLMContext(
             tools = emptyList(),
             prompt = prompt,
-            model = OpenAIModels.CostOptimized.GPT4oMini,
+            model = OpenAIModels.Chat.GPT4oMini,
+            responseProcessor = null,
             promptExecutor = mockExecutor,
             environment = createTestEnvironment(),
             config = createTestConfig(),
@@ -101,7 +102,8 @@ class AIAgentLLMSessionStructuredOutputTest : AgentTestBase() {
         val llmContext = AIAgentLLMContext(
             tools = emptyList(),
             prompt = prompt,
-            model = OpenAIModels.CostOptimized.GPT4oMini,
+            model = OpenAIModels.Chat.GPT4oMini,
+            responseProcessor = null,
             promptExecutor = mockExecutor,
             environment = createTestEnvironment(),
             config = createTestConfig(),
@@ -171,7 +173,8 @@ class AIAgentLLMSessionStructuredOutputTest : AgentTestBase() {
         val llmContext = AIAgentLLMContext(
             tools = emptyList(),
             prompt = prompt,
-            model = OpenAIModels.CostOptimized.GPT4oMini,
+            model = OpenAIModels.Chat.GPT4oMini,
+            responseProcessor = null,
             promptExecutor = mockExecutor,
             environment = createTestEnvironment(),
             config = createTestConfig(),
