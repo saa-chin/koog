@@ -162,7 +162,7 @@ public infix fun <IncomingOutput, OutgoingInput> AIAgentEdgeBuilderIntermediate<
     return onIsInstance(List::class)
         .transformed { it.filterIsInstance<Message.Tool.Call>() }
         // skipping this edge in case we have list of only assistant messages
-        .onCondition { it.any() }
+        .onCondition { it.isNotEmpty() }
         .onCondition { toolCalls -> block(toolCalls) }
 }
 
@@ -178,6 +178,7 @@ public infix fun <IncomingOutput, IntermediateOutput, OutgoingInput> AIAgentEdge
 ): AIAgentEdgeBuilderIntermediate<IncomingOutput, List<ReceivedToolResult>, OutgoingInput> {
     return onIsInstance(List::class)
         .transformed { it.filterIsInstance<ReceivedToolResult>() }
+        .onCondition { it.isNotEmpty() }
         .onCondition { toolResults -> block(toolResults) }
 }
 
@@ -196,6 +197,19 @@ public infix fun <IncomingOutput, IntermediateOutput, OutgoingInput> AIAgentEdge
 }
 
 /**
+ * Creates an edge that filters a reasoning message based on a custom condition
+ *
+ * @param block A function that evaluates whether to accept a reasoning message
+ */
+@EdgeTransformationDslMarker
+public infix fun <IncomingOutput, IntermediateOutput, OutgoingInput> AIAgentEdgeBuilderIntermediate<IncomingOutput, IntermediateOutput, OutgoingInput>.onReasoningMessage(
+    block: suspend (Message.Reasoning) -> Boolean
+): AIAgentEdgeBuilderIntermediate<IncomingOutput, Message.Reasoning, OutgoingInput> {
+    return onIsInstance(Message.Reasoning::class)
+        .onCondition { signature -> block(signature) }
+}
+
+/**
  * Creates an edge that filters assistant messages based on a custom condition and extracts their content.
  *
  * @param block A function that evaluates whether to accept an assistant message
@@ -206,7 +220,22 @@ public infix fun <IncomingOutput, OutgoingInput> AIAgentEdgeBuilderIntermediate<
 ): AIAgentEdgeBuilderIntermediate<IncomingOutput, List<Message.Assistant>, OutgoingInput> {
     return onIsInstance(List::class)
         .transformed { it.filterIsInstance<Message.Assistant>() }
-        .onCondition { toolResults -> block(toolResults) }
+        .onCondition { it.isNotEmpty() }
+        .onCondition { messages -> block(messages) }
+}
+
+/**
+ * Creates an edge that filters lists of reasoning messages based on a custom condition.
+ *
+ * @param block A function that evaluates whether to accept a list of reasoning messages
+ */
+public infix fun <IncomingOutput, OutgoingInput> AIAgentEdgeBuilderIntermediate<IncomingOutput, List<Message.Response>, OutgoingInput>.onMultipleReasoningMessages(
+    block: suspend (List<Message.Reasoning>) -> Boolean
+): AIAgentEdgeBuilderIntermediate<IncomingOutput, List<Message.Reasoning>, OutgoingInput> {
+    return onIsInstance(List::class)
+        .transformed { it.filterIsInstance<Message.Reasoning>() }
+        .onCondition { it.isNotEmpty() }
+        .onCondition { messages -> block(messages) }
 }
 
 /**

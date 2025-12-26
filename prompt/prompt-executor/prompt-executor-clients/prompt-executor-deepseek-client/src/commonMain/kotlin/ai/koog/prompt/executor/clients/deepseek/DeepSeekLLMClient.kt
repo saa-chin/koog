@@ -11,7 +11,9 @@ import ai.koog.prompt.executor.clients.deepseek.models.DeepSeekChatCompletionStr
 import ai.koog.prompt.executor.clients.deepseek.models.DeepSeekModelsResponse
 import ai.koog.prompt.executor.clients.openai.base.AbstractOpenAILLMClient
 import ai.koog.prompt.executor.clients.openai.base.OpenAIBaseSettings
+import ai.koog.prompt.executor.clients.openai.base.OpenAICompatibleToolDescriptorSchemaGenerator
 import ai.koog.prompt.executor.clients.openai.base.models.OpenAIMessage
+import ai.koog.prompt.executor.clients.openai.base.models.OpenAIResponseFormat
 import ai.koog.prompt.executor.clients.openai.base.models.OpenAITool
 import ai.koog.prompt.executor.clients.openai.base.models.OpenAIToolChoice
 import ai.koog.prompt.llm.LLMProvider
@@ -50,13 +52,15 @@ public class DeepSeekLLMClient(
     apiKey: String,
     private val settings: DeepSeekClientSettings = DeepSeekClientSettings(),
     baseClient: HttpClient = HttpClient(),
-    clock: Clock = Clock.System
+    clock: Clock = Clock.System,
+    toolsConverter: OpenAICompatibleToolDescriptorSchemaGenerator = OpenAICompatibleToolDescriptorSchemaGenerator()
 ) : AbstractOpenAILLMClient<DeepSeekChatCompletionResponse, DeepSeekChatCompletionStreamResponse>(
-    apiKey,
-    settings,
-    baseClient,
-    clock,
-    staticLogger
+    apiKey = apiKey,
+    settings = settings,
+    baseClient = baseClient,
+    clock = clock,
+    logger = staticLogger,
+    toolsConverter = toolsConverter
 ) {
 
     private companion object {
@@ -140,11 +144,28 @@ public class DeepSeekLLMClient(
         }
     }
 
+    override fun createResponseFormat(schema: LLMParams.Schema?, model: LLModel): OpenAIResponseFormat? {
+        return schema?.let {
+            require(it.capability in model.capabilities) {
+                "Model ${model.id} does not support structured output schema ${it.name}"
+            }
+            when (it) {
+                is LLMParams.Schema.JSON -> OpenAIResponseFormat.JsonObject()
+            }
+        }
+    }
+
     public override suspend fun moderate(prompt: Prompt, model: LLModel): ModerationResult {
         logger.warn { "Moderation is not supported by DeepSeek API" }
         throw UnsupportedOperationException("Moderation is not supported by DeepSeek API.")
     }
 
+    /**
+     * Fetches a list of available model identifiers from the DeepSeek service.
+     * https://api-docs.deepseek.com/api/list-models
+     *
+     * @return A list of string identifiers representing the available models.
+     */
     public override suspend fun models(): List<String> {
         logger.debug { "Fetching available models from DeepSeek" }
 

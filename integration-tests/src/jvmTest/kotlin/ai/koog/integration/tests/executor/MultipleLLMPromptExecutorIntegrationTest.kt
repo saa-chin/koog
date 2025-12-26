@@ -115,6 +115,12 @@ class MultipleLLMPromptExecutorIntegrationTest : ExecutorIntegrationTestBase() {
 
     @ParameterizedTest
     @MethodSource("allCompletionModels")
+    override fun integration_testExecuteStreamingWithTools(model: LLModel) {
+        super.integration_testExecuteStreamingWithTools(model)
+    }
+
+    @ParameterizedTest
+    @MethodSource("allCompletionModels")
     override fun integration_testToolWithRequiredParams(model: LLModel) {
         super.integration_testToolWithRequiredParams(model)
     }
@@ -255,5 +261,11 @@ class MultipleLLMPromptExecutorIntegrationTest : ExecutorIntegrationTestBase() {
     @MethodSource("reasoningCapableModels")
     override fun integration_testReasoningWithEncryption(model: LLModel) {
         super.integration_testReasoningWithEncryption(model)
+    }
+
+    @ParameterizedTest
+    @MethodSource("reasoningCapableModels")
+    override fun integration_testReasoningMultiStep(model: LLModel) {
+        super.integration_testReasoningMultiStep(model)
     }
 }

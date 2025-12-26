@@ -11,6 +11,8 @@ import ai.koog.prompt.llm.LLModel
 import ai.koog.prompt.message.LLMChoice
 import ai.koog.prompt.message.Message
 import ai.koog.prompt.params.LLMParams
+import ai.koog.prompt.processor.ResponseProcessor
+import ai.koog.prompt.processor.executeProcessed
 import ai.koog.prompt.streaming.StreamFrame
 import ai.koog.prompt.structure.StructureFixingParser
 import ai.koog.prompt.structure.StructuredRequestConfig
@@ -37,51 +39,36 @@ public sealed class AIAgentLLMSession(
     tools: List<ToolDescriptor>,
     prompt: Prompt,
     model: LLModel,
+    responseProcessor: ResponseProcessor?,
     protected val config: AIAgentConfig,
 ) : AutoCloseable {
     /**
      * Represents the current prompt associated with the LLM session.
-     * The prompt captures the input messages, model configuration, and parameters
-     * used for interactions with the underlying language model.
-     *
-     * The property is managed using an active state validation mechanism, which ensures
-     * that the prompt can only be accessed or modified when the session is active.
-     *
-     * Delegated by [ActiveProperty] to enforce session-based activity checks,
-     * ensuring the property cannot be accessed when the [isActive] predicate evaluates to false.
+     * The prompt contains the input messages, model configuration, and parameters.
      *
      * Typical usage includes providing input to LLM requests, such as:
      * - [requestLLMWithoutTools]
      * - [requestLLM]
-     * etc.
+     * - etc.
      */
     public open val prompt: Prompt by ActiveProperty(prompt) { isActive }
 
     /**
      * Provides a list of tools based on the current active state.
-     *
-     * This property holds a collection of [ToolDescriptor] instances, which describe the tools available
-     * for use in the AI agent session. The tools are dynamically determined and validated based on the
-     * [isActive] state of the session. The property ensures that tools can only be accessed when the session
-     * is active, leveraging the [ActiveProperty] delegate for state validation.
-     *
-     * Accessing this property when the session is inactive will raise an exception, ensuring consistency
-     * and preventing misuse of tools outside a valid context.
+     * This property holds a collection of [ToolDescriptor] instances, which describe the tools available for use.
      */
     public open val tools: List<ToolDescriptor> by ActiveProperty(tools) { isActive }
 
     /**
      * Represents the active language model used within the session.
-     *
-     * This property is backed by a delegate that ensures it can only be accessed
-     * while the session is active, as determined by the [isActive] property.
-     *
-     * The model defines the language generation capabilities available for executing prompts
-     * and tool interactions within the session's context.
-     *
-     * Usage of this property when the session is inactive will result in an exception.
      */
     public open val model: LLModel by ActiveProperty(model) { isActive }
+
+    /**
+     * Represents the active response processor within the session.
+     * The processor defines the post-processing of messages returned from the LLM.
+     */
+    public open val responseProcessor: ResponseProcessor? by ActiveProperty(responseProcessor) { isActive }
 
     /**
      * A flag indicating whether the session is currently active.
@@ -94,12 +81,7 @@ public sealed class AIAgentLLMSession(
     /**
      * Ensures that the session is active before allowing further operations.
      *
-     * This method validates the state of the session using the [isActive] property
-     * and throws an exception if the session has been closed. It is primarily intended
-     * to prevent operations on an inactive or closed session, ensuring safe and valid usage.
-     *
-     * Throws:
-     * - `IllegalStateException` if the session is not active.
+     * @throws IllegalStateException if the session is not active.
      */
     protected fun validateSession() {
         check(isActive) { "Cannot use session after it was closed" }
@@ -116,11 +98,26 @@ public sealed class AIAgentLLMSession(
 
     protected suspend fun executeMultiple(prompt: Prompt, tools: List<ToolDescriptor>): List<Message.Response> {
         val preparedPrompt = preparePrompt(prompt, tools)
-        return executor.execute(preparedPrompt, model, tools)
+        return executor.executeProcessed(preparedPrompt, model, tools, responseProcessor)
     }
 
     protected suspend fun executeSingle(prompt: Prompt, tools: List<ToolDescriptor>): Message.Response =
         executeMultiple(prompt, tools).first()
+
+    /**
+     * Sends a request to the language model without utilizing any tools and returns multiple responses.
+     *
+     * @return A list of response messages from the language model.
+     */
+    public open suspend fun requestLLMMultipleWithoutTools(): List<Message.Response> {
+        validateSession()
+
+        val promptWithDisabledTools = prompt
+            .withUpdatedParams { toolChoice = null }
+            .let { preparePrompt(it, emptyList()) }
+
+        return executeMultiple(promptWithDisabledTools, emptyList())
+    }
 
     /**
      * Sends a request to the language model without utilizing any tools and returns the response.
@@ -143,23 +140,49 @@ public sealed class AIAgentLLMSession(
             .withUpdatedParams { toolChoice = null }
             .let { preparePrompt(it, emptyList()) }
 
-        return executeSingle(promptWithDisabledTools, emptyList())
+        return executeMultiple(promptWithDisabledTools, emptyList()).first { it !is Message.Reasoning }
     }
 
     /**
      * Sends a request to the language model that enforces the usage of tools and retrieves the response.
      *
-     * This method updates the session's prompt configuration to mark tool usage as required before
-     * executing the request. Additionally, it ensures the session is active before proceeding.
+     * This method:
+     * 1. Validates that the session is active.
+     * 2. Updates the prompt configuration to mark tool usage as required (`ToolChoice.Required`).
+     * 3. Retrieves all generated messages (including potential Chain of Thought/Reasoning blocks).
+     * 4. Filters the result to return the first [Message.Tool.Call].
      *
-     * @return The response from the language model after executing the request with enforced tool usage.
+     * If no tool call is found (e.g., the model refused or asked a question), this method throws an exception.
+     *
+     * @return The tool call response from the language model.
      */
     public open suspend fun requestLLMOnlyCallingTools(): Message.Response {
+        validateSession()
+        // We use the multiple-response method to ensure we capture all context (e.g. thinking)
+        // even though we only return the specific tool call.
+        val responses = requestLLMMultipleOnlyCallingTools()
+        return responses.firstOrNull { it is Message.Tool.Call }
+            ?: error("requestLLMOnlyCallingTools expected at least one Tool.Call but received: ${responses.map { it::class.simpleName }}")
+    }
+
+    /**
+     * Sends a request to the language model that enforces the usage of tools and retrieves all responses.
+     *
+     * This is useful when the LLM returns multiple messages, such as a "thinking" block followed by tool calls,
+     * or multiple parallel tool calls.
+     *
+     * This method:
+     * 1. Validates that the session is active.
+     * 2. Updates the prompt configuration to mark tool usage as required (`ToolChoice.Required`).
+     *
+     * @return A list of responses from the language model.
+     */
+    public open suspend fun requestLLMMultipleOnlyCallingTools(): List<Message.Response> {
         validateSession()
         val promptWithOnlyCallingTools = prompt.withUpdatedParams {
             toolChoice = LLMParams.ToolChoice.Required
         }
-        return executeSingle(promptWithOnlyCallingTools, tools)
+        return executeMultiple(promptWithOnlyCallingTools, tools)
     }
 
     /**
@@ -209,7 +232,7 @@ public sealed class AIAgentLLMSession(
      */
     public open suspend fun requestLLM(): Message.Response {
         validateSession()
-        return executeSingle(prompt, tools)
+        return executeMultiple(prompt, tools).first { it !is Message.Reasoning }
     }
 
     /**

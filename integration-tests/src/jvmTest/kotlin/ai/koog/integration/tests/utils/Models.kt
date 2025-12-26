@@ -17,16 +17,16 @@ object Models {
     @JvmStatic
     fun openAIModels(): Stream<LLModel> {
         return Stream.of(
-            OpenAIModels.Chat.GPT5,
-            OpenAIModels.Reasoning.O1,
-            OpenAIModels.CostOptimized.GPT4_1Mini,
+            OpenAIModels.Chat.GPT5_2, // reasoning
+            OpenAIModels.Chat.GPT4_1, // non-reasoning
+            OpenAIModels.Chat.GPT5_1Codex
         )
     }
 
     @JvmStatic
     fun anthropicModels(): Stream<LLModel> {
         return Stream.of(
-            AnthropicModels.Opus_4_1,
+            AnthropicModels.Opus_4_5,
             AnthropicModels.Haiku_4_5,
             AnthropicModels.Sonnet_4_5,
         )
@@ -43,7 +43,7 @@ object Models {
     @JvmStatic
     fun openRouterModels(): Stream<LLModel> = Stream.of(
         OpenRouterModels.DeepSeekV30324,
-        OpenRouterModels.Qwen2_5,
+        OpenRouterModels.Qwen3VL,
     )
 
     @JvmStatic
@@ -65,6 +65,7 @@ object Models {
             BedrockModels.Embeddings.AmazonTitanEmbedText,
             OpenAIModels.Embeddings.TextEmbedding3Large,
             MistralAIModels.Embeddings.MistralEmbed,
+            GoogleModels.Embeddings.GeminiEmbedding001,
         )
     }
 
@@ -102,9 +103,11 @@ object Models {
     @JvmStatic
     fun reasoningCapableModels(): Stream<LLModel> {
         return Stream.of(
-            OpenAIModels.Chat.GPT5,
+            // Replaced 5.2 with 5.1-Codex because of the unstable 5.2 behaviour, see KG-625
+            OpenAIModels.Chat.GPT5_1Codex,
             AnthropicModels.Haiku_4_5,
             GoogleModels.Gemini2_5Pro,
+            GoogleModels.Gemini3_Pro_Preview,
         )
     }
 

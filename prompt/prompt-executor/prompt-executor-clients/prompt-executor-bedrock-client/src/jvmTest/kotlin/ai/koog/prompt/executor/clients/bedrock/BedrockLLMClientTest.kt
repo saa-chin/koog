@@ -6,6 +6,7 @@ import ai.koog.agents.core.tools.ToolParameterType
 import ai.koog.prompt.dsl.ModerationCategory
 import ai.koog.prompt.dsl.Prompt
 import ai.koog.prompt.executor.clients.ConnectionTimeoutConfig
+import ai.koog.prompt.executor.clients.LLMClientException
 import ai.koog.prompt.llm.LLMCapability
 import ai.koog.prompt.llm.LLMProvider
 import ai.koog.prompt.llm.LLModel
@@ -36,11 +37,15 @@ import aws.sdk.kotlin.services.bedrockruntime.model.ListAsyncInvokesRequest
 import aws.sdk.kotlin.services.bedrockruntime.model.ListAsyncInvokesResponse
 import aws.sdk.kotlin.services.bedrockruntime.model.StartAsyncInvokeRequest
 import aws.sdk.kotlin.services.bedrockruntime.model.StartAsyncInvokeResponse
+import io.kotest.matchers.nulls.shouldNotBeNull
+import io.kotest.matchers.shouldBe
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.datetime.Clock
 import org.junit.jupiter.api.parallel.Execution
 import org.junit.jupiter.api.parallel.ExecutionMode
+import kotlin.random.Random.Default.nextInt
+import kotlin.random.Random.Default.nextLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
@@ -48,6 +53,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
 
 class BedrockLLMClientTest {
     @Test
@@ -78,21 +84,39 @@ class BedrockLLMClientTest {
     fun `can create BedrockModel with custom inference prefix`() {
         val originalModel = BedrockModels.AnthropicClaude4Sonnet
 
+        val globalModel = originalModel.withInferenceProfile(BedrockInferencePrefixes.GLOBAL.prefix)
         val euModel = originalModel.withInferenceProfile(BedrockInferencePrefixes.EU.prefix)
         val apModel = originalModel.withInferenceProfile(BedrockInferencePrefixes.AP.prefix)
 
         assertTrue(originalModel.id.startsWith(BedrockInferencePrefixes.US.prefix))
         assertTrue(originalModel.id.contains("us.anthropic"))
 
+        assertTrue(globalModel.id.startsWith(BedrockInferencePrefixes.GLOBAL.prefix))
+        assertFalse(globalModel.id.contains("us.anthropic"))
+
         assertTrue(euModel.id.startsWith(BedrockInferencePrefixes.EU.prefix))
         assertFalse(euModel.id.contains("us.anthropic"))
+
         assertTrue(apModel.id.startsWith(BedrockInferencePrefixes.AP.prefix))
         assertFalse(apModel.id.contains("us.anthropic"))
 
+        // Verify global model properties
+        assertEquals(originalModel.provider, globalModel.provider)
+        assertEquals(originalModel.capabilities, globalModel.capabilities)
+        assertEquals(originalModel.contextLength, globalModel.contextLength)
+        assertEquals(originalModel.maxOutputTokens, globalModel.maxOutputTokens)
+
+        // Verify EU model properties
         assertEquals(originalModel.provider, euModel.provider)
         assertEquals(originalModel.capabilities, euModel.capabilities)
         assertEquals(originalModel.contextLength, euModel.contextLength)
         assertEquals(originalModel.maxOutputTokens, euModel.maxOutputTokens)
+
+        // Verify AP model properties
+        assertEquals(originalModel.provider, apModel.provider)
+        assertEquals(originalModel.capabilities, apModel.capabilities)
+        assertEquals(originalModel.contextLength, apModel.contextLength)
+        assertEquals(originalModel.maxOutputTokens, apModel.maxOutputTokens)
     }
 
     @Test
@@ -140,15 +164,22 @@ class BedrockLLMClientTest {
 
     @Test
     fun `client configuration options work correctly`() {
+        // given
+        val requestTimeoutMillis = nextLong(1000, 2000)
+        val connectTimeoutMillis = nextLong(100, 200)
+        val socketTimeoutMillis = nextLong(200, 300)
+        val maxRetries = nextInt(5, 10)
+
+        // when
         val customSettings = BedrockClientSettings(
             region = BedrockRegions.EU_WEST_1.regionCode,
             endpointUrl = "https://custom.endpoint.com",
-            maxRetries = 5,
+            maxRetries = maxRetries,
             enableLogging = true,
             timeoutConfig = ConnectionTimeoutConfig(
-                requestTimeoutMillis = 120_000,
-                connectTimeoutMillis = 10_000,
-                socketTimeoutMillis = 120_000
+                requestTimeoutMillis = requestTimeoutMillis,
+                connectTimeoutMillis = connectTimeoutMillis,
+                socketTimeoutMillis = socketTimeoutMillis
             )
         )
 
@@ -161,11 +192,21 @@ class BedrockLLMClientTest {
             clock = Clock.System
         )
 
-        assertNotNull(client)
-        assertEquals(BedrockRegions.EU_WEST_1.regionCode, customSettings.region)
-        assertEquals("https://custom.endpoint.com", customSettings.endpointUrl)
-        assertEquals(5, customSettings.maxRetries)
-        assertEquals(true, customSettings.enableLogging)
+        // then
+        client shouldNotBeNull {
+            bedrockClient.config shouldNotBeNull {
+                callTimeout shouldBe requestTimeoutMillis.milliseconds
+                endpointUrl.toString() shouldBe "https://custom.endpoint.com"
+                region shouldBe BedrockRegions.EU_WEST_1.regionCode
+                retryStrategy.config.maxAttempts shouldBe maxRetries
+
+                httpClient.config shouldNotBeNull {
+                    socketReadTimeout.inWholeMilliseconds shouldBe socketTimeoutMillis
+                    socketWriteTimeout.inWholeMilliseconds shouldBe socketTimeoutMillis
+                    connectTimeout.inWholeMilliseconds shouldBe connectTimeoutMillis
+                }
+            }
+        }
     }
 
     @Test
@@ -252,7 +293,10 @@ class BedrockLLMClientTest {
             override suspend fun converse(input: ConverseRequest): ConverseResponse =
                 throw UnsupportedOperationException("converse not implemented in mock client")
 
-            override suspend fun <T> converseStream(input: ConverseStreamRequest, block: suspend (ConverseStreamResponse) -> T): T =
+            override suspend fun <T> converseStream(
+                input: ConverseStreamRequest,
+                block: suspend (ConverseStreamResponse) -> T
+            ): T =
                 throw UnsupportedOperationException("converseStream not implemented in mock client")
 
             override suspend fun getAsyncInvoke(input: GetAsyncInvokeRequest): GetAsyncInvokeResponse =
@@ -261,10 +305,16 @@ class BedrockLLMClientTest {
             override suspend fun invokeModel(input: InvokeModelRequest): InvokeModelResponse =
                 throw UnsupportedOperationException("invokeModel not implemented in mock client")
 
-            override suspend fun <T> invokeModelWithBidirectionalStream(input: InvokeModelWithBidirectionalStreamRequest, block: suspend (InvokeModelWithBidirectionalStreamResponse) -> T): T =
+            override suspend fun <T> invokeModelWithBidirectionalStream(
+                input: InvokeModelWithBidirectionalStreamRequest,
+                block: suspend (InvokeModelWithBidirectionalStreamResponse) -> T
+            ): T =
                 throw UnsupportedOperationException("invokeModelWithBidirectionalStream not implemented in mock client")
 
-            override suspend fun <T> invokeModelWithResponseStream(input: InvokeModelWithResponseStreamRequest, block: suspend (InvokeModelWithResponseStreamResponse) -> T): T =
+            override suspend fun <T> invokeModelWithResponseStream(
+                input: InvokeModelWithResponseStreamRequest,
+                block: suspend (InvokeModelWithResponseStreamResponse) -> T
+            ): T =
                 throw UnsupportedOperationException("invokeModelWithResponseStream not implemented in mock client")
 
             override suspend fun listAsyncInvokes(input: ListAsyncInvokesRequest): ListAsyncInvokesResponse =
@@ -319,7 +369,7 @@ class BedrockLLMClientTest {
         val model = BedrockModels.AnthropicClaude3Sonnet
 
         // Verify that moderate method throws an exception because moderationGuardrailsSettings wasn't provided
-        assertFailsWith<IllegalArgumentException> {
+        assertFailsWith<LLMClientException> {
             client.moderate(prompt, model)
         }
     }
@@ -383,7 +433,11 @@ class BedrockLLMClientTest {
 
             client.moderate(prompt, model)
 
-            assertEquals(2, applyGuardrailCallCount, "Should call applyGuardrail exactly twice for prompts with both Request and Response")
+            assertEquals(
+                2,
+                applyGuardrailCallCount,
+                "Should call applyGuardrail exactly twice for prompts with both Request and Response"
+            )
         } finally {
             client.close()
         }
@@ -415,7 +469,11 @@ class BedrockLLMClientTest {
 
             client.moderate(prompt, model)
 
-            assertEquals(1, applyGuardrailCallCount, "Should call applyGuardrail exactly once for Response-only prompts")
+            assertEquals(
+                1,
+                applyGuardrailCallCount,
+                "Should call applyGuardrail exactly once for Response-only prompts"
+            )
         } finally {
             client.close()
         }
@@ -439,7 +497,10 @@ class BedrockLLMClientTest {
             override suspend fun converse(input: ConverseRequest): ConverseResponse =
                 throw UnsupportedOperationException("converse not implemented in mock client")
 
-            override suspend fun <T> converseStream(input: ConverseStreamRequest, block: suspend (ConverseStreamResponse) -> T): T =
+            override suspend fun <T> converseStream(
+                input: ConverseStreamRequest,
+                block: suspend (ConverseStreamResponse) -> T
+            ): T =
                 throw UnsupportedOperationException("converseStream not implemented in mock client")
 
             override suspend fun getAsyncInvoke(input: GetAsyncInvokeRequest): GetAsyncInvokeResponse =
@@ -448,10 +509,16 @@ class BedrockLLMClientTest {
             override suspend fun invokeModel(input: InvokeModelRequest): InvokeModelResponse =
                 throw UnsupportedOperationException("invokeModel not implemented in mock client")
 
-            override suspend fun <T> invokeModelWithBidirectionalStream(input: InvokeModelWithBidirectionalStreamRequest, block: suspend (InvokeModelWithBidirectionalStreamResponse) -> T): T =
+            override suspend fun <T> invokeModelWithBidirectionalStream(
+                input: InvokeModelWithBidirectionalStreamRequest,
+                block: suspend (InvokeModelWithBidirectionalStreamResponse) -> T
+            ): T =
                 throw UnsupportedOperationException("invokeModelWithBidirectionalStream not implemented in mock client")
 
-            override suspend fun <T> invokeModelWithResponseStream(input: InvokeModelWithResponseStreamRequest, block: suspend (InvokeModelWithResponseStreamResponse) -> T): T =
+            override suspend fun <T> invokeModelWithResponseStream(
+                input: InvokeModelWithResponseStreamRequest,
+                block: suspend (InvokeModelWithResponseStreamResponse) -> T
+            ): T =
                 throw UnsupportedOperationException("invokeModelWithResponseStream not implemented in mock client")
 
             override suspend fun listAsyncInvokes(input: ListAsyncInvokesRequest): ListAsyncInvokesResponse =
@@ -505,7 +572,7 @@ class BedrockLLMClientTest {
     }
 
     @Test
-    fun `execute throws IllegalArgumentException for model without Completion capability`() = runTest {
+    fun `execute throws LLMClientException for model without Completion capability`() = runTest {
         val client = BedrockLLMClient(
             identityProvider = StaticCredentialsProvider {
                 accessKeyId = "test-key"
@@ -523,7 +590,7 @@ class BedrockLLMClientTest {
         val prompt = Prompt.build("test") {
             user("Some input")
         }
-        assertFailsWith<IllegalArgumentException> {
+        assertFailsWith<LLMClientException> {
             client.execute(prompt, noCompletionModel, emptyList())
         }
     }
@@ -567,7 +634,7 @@ class BedrockLLMClientTest {
     }
 
     @Test
-    fun `executeStreaming throws IllegalArgumentException for model without Completion capability`() = runTest {
+    fun `executeStreaming throws LLMClientException for model without Completion capability`() = runTest {
         val client = BedrockLLMClient(
             identityProvider = StaticCredentialsProvider {
                 accessKeyId = "test-key"
@@ -585,8 +652,237 @@ class BedrockLLMClientTest {
         val prompt = Prompt.build("test") {
             user("Some input")
         }
-        assertFailsWith<IllegalArgumentException> {
+        assertFailsWith<LLMClientException> {
             client.executeStreaming(prompt, noCompletionModel, emptyList()).toList()
         }
+    }
+
+    @Test
+    fun `getBedrockModelFamily returns correct families for known models`() {
+        val client = BedrockLLMClient(
+            identityProvider = StaticCredentialsProvider {
+                accessKeyId = "test-key"
+                secretAccessKey = "test-secret"
+            },
+            settings = BedrockClientSettings(region = BedrockRegions.US_EAST_1.regionCode),
+            clock = Clock.System
+        )
+
+        // Test known model families
+        val anthropicModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "anthropic.claude-3-sonnet-20240229-v1:0",
+            capabilities = listOf(LLMCapability.Completion),
+            contextLength = 200_000
+        )
+        assertEquals(BedrockModelFamilies.AnthropicClaude, client.getBedrockModelFamily(anthropicModel))
+
+        val novaModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "amazon.nova-micro-v1:0",
+            capabilities = listOf(LLMCapability.Completion),
+            contextLength = 128_000
+        )
+        assertEquals(BedrockModelFamilies.AmazonNova, client.getBedrockModelFamily(novaModel))
+
+        val jambaModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "ai21.jamba-instruct-v1:0",
+            capabilities = listOf(LLMCapability.Completion),
+            contextLength = 256_000
+        )
+        assertEquals(BedrockModelFamilies.AI21Jamba, client.getBedrockModelFamily(jambaModel))
+
+        val llamaModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "meta.llama3-1-8b-instruct-v1:0",
+            capabilities = listOf(LLMCapability.Completion),
+            contextLength = 128_000
+        )
+        assertEquals(BedrockModelFamilies.Meta, client.getBedrockModelFamily(llamaModel))
+
+        val titanModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "amazon.titan-embed-text-v1",
+            capabilities = listOf(LLMCapability.Embed),
+            contextLength = 8_192
+        )
+        assertEquals(BedrockModelFamilies.TitanEmbedding, client.getBedrockModelFamily(titanModel))
+
+        val cohereModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "cohere.embed-english-v3",
+            capabilities = listOf(LLMCapability.Embed),
+            contextLength = 512
+        )
+        assertEquals(BedrockModelFamilies.Cohere, client.getBedrockModelFamily(cohereModel))
+    }
+
+    @Test
+    fun `getBedrockModelFamily throws exception for unsupported model without fallback`() {
+        val client = BedrockLLMClient(
+            identityProvider = StaticCredentialsProvider {
+                accessKeyId = "test-key"
+                secretAccessKey = "test-secret"
+            },
+            settings = BedrockClientSettings(region = BedrockRegions.US_EAST_1.regionCode),
+            clock = Clock.System
+        )
+
+        val unsupportedModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "unsupported.new-model-v1:0",
+            capabilities = listOf(LLMCapability.Completion),
+            contextLength = 100_000
+        )
+
+        val exception = assertFailsWith<LLMClientException> {
+            client.getBedrockModelFamily(unsupportedModel)
+        }
+
+        assertTrue(exception.message!!.contains("Model unsupported.new-model-v1:0 is not a supported Bedrock model"))
+    }
+
+    @Test
+    fun `getBedrockModelFamily uses fallback for unsupported model when fallback is configured`() {
+        val fallbackFamily = BedrockModelFamilies.AnthropicClaude
+
+        val client = BedrockLLMClient(
+            identityProvider = StaticCredentialsProvider {
+                accessKeyId = "test-key"
+                secretAccessKey = "test-secret"
+            },
+            settings = BedrockClientSettings(
+                region = BedrockRegions.US_EAST_1.regionCode,
+                fallbackModelFamily = fallbackFamily
+            ),
+            clock = Clock.System
+        )
+
+        val unsupportedModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "unsupported.new-model-v1:0",
+            capabilities = listOf(LLMCapability.Completion),
+            contextLength = 100_000
+        )
+
+        val result = client.getBedrockModelFamily(unsupportedModel)
+        assertEquals(fallbackFamily, result)
+    }
+
+    @Test
+    fun `getBedrockModelFamily uses different fallback families correctly`() {
+        // Test with AnthropicClaude fallback
+        val anthropicClient = BedrockLLMClient(
+            identityProvider = StaticCredentialsProvider {
+                accessKeyId = "test-key"
+                secretAccessKey = "test-secret"
+            },
+            settings = BedrockClientSettings(
+                region = BedrockRegions.US_EAST_1.regionCode,
+                fallbackModelFamily = BedrockModelFamilies.AnthropicClaude
+            ),
+            clock = Clock.System
+        )
+
+        // Test with Meta fallback
+        val metaClient = BedrockLLMClient(
+            identityProvider = StaticCredentialsProvider {
+                accessKeyId = "test-key"
+                secretAccessKey = "test-secret"
+            },
+            settings = BedrockClientSettings(
+                region = BedrockRegions.US_EAST_1.regionCode,
+                fallbackModelFamily = BedrockModelFamilies.Meta
+            ),
+            clock = Clock.System
+        )
+
+        val unsupportedModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "unsupported.new-model-v1:0",
+            capabilities = listOf(LLMCapability.Completion),
+            contextLength = 100_000
+        )
+
+        assertEquals(BedrockModelFamilies.AnthropicClaude, anthropicClient.getBedrockModelFamily(unsupportedModel))
+        assertEquals(BedrockModelFamilies.Meta, metaClient.getBedrockModelFamily(unsupportedModel))
+    }
+
+    @Test
+    fun `primary constructor accepts fallback parameter`() {
+        val mockClient = createCountingMockClient { }
+        val fallbackFamily = BedrockModelFamilies.AmazonNova
+
+        val client = BedrockLLMClient(
+            bedrockClient = mockClient,
+            moderationGuardrailsSettings = null,
+            fallbackModelFamily = fallbackFamily,
+            clock = Clock.System
+        )
+
+        val unsupportedModel = LLModel(
+            provider = LLMProvider.Bedrock,
+            id = "unsupported.new-model-v1:0",
+            capabilities = listOf(LLMCapability.Completion),
+            contextLength = 100_000
+        )
+
+        val result = client.getBedrockModelFamily(unsupportedModel)
+        assertEquals(fallbackFamily, result)
+
+        client.close()
+    }
+
+    @Test
+    fun `fallback model family null by default in settings`() {
+        val defaultSettings = BedrockClientSettings()
+        assertEquals(null, defaultSettings.fallbackModelFamily)
+    }
+
+    @Test
+    fun `getBedrockModelFamily requires Bedrock provider`() {
+        val client = BedrockLLMClient(
+            identityProvider = StaticCredentialsProvider {
+                accessKeyId = "test-key"
+                secretAccessKey = "test-secret"
+            },
+            settings = BedrockClientSettings(region = BedrockRegions.US_EAST_1.regionCode),
+            clock = Clock.System
+        )
+
+        val nonBedrockModel = LLModel(
+            provider = LLMProvider.Anthropic,
+            id = "claude-3-sonnet-20240229",
+            capabilities = listOf(LLMCapability.Completion),
+            contextLength = 200_000
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            client.getBedrockModelFamily(nonBedrockModel)
+        }
+    }
+
+    @Test
+    fun `BedrockClientSettings with fallback model family works correctly`() {
+        val fallbackFamily = BedrockModelFamilies.AI21Jamba
+        val settings = BedrockClientSettings(
+            region = BedrockRegions.EU_WEST_1.regionCode,
+            endpointUrl = "https://custom.endpoint.com",
+            maxRetries = 5,
+            enableLogging = true,
+            timeoutConfig = ConnectionTimeoutConfig(
+                requestTimeoutMillis = 120_000,
+                connectTimeoutMillis = 10_000,
+                socketTimeoutMillis = 120_000
+            ),
+            fallbackModelFamily = fallbackFamily
+        )
+
+        assertEquals(fallbackFamily, settings.fallbackModelFamily)
+        assertEquals(BedrockRegions.EU_WEST_1.regionCode, settings.region)
+        assertEquals("https://custom.endpoint.com", settings.endpointUrl)
+        assertEquals(5, settings.maxRetries)
+        assertEquals(true, settings.enableLogging)
     }
 }

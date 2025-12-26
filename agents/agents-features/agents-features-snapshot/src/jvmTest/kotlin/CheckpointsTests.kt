@@ -3,6 +3,7 @@ import ai.koog.agents.core.agent.AIAgentService
 import ai.koog.agents.core.agent.GraphAIAgentService
 import ai.koog.agents.core.agent.config.AIAgentConfig
 import ai.koog.agents.core.agent.entity.AIAgentGraphStrategy
+import ai.koog.agents.core.agent.execution.path
 import ai.koog.agents.core.dsl.builder.AIAgentGraphStrategyBuilder
 import ai.koog.agents.core.dsl.builder.AIAgentNodeDelegate
 import ai.koog.agents.core.dsl.builder.strategy
@@ -27,7 +28,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.datetime.Clock
-import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonPrimitive
@@ -72,7 +72,7 @@ class CheckpointsTests {
                     withPersistence { ctx ->
                         createCheckpoint(
                             agentContext = ctx,
-                            nodeId = currentNodeId ?: error("currentNodeId not set"),
+                            nodePath = ctx.executionInfo.path(),
                             lastInput = input,
                             lastInputType = typeOf<String>(),
                             checkpointId = "cpt-100500",
@@ -145,20 +145,24 @@ class CheckpointsTests {
     @Serializable
     data class WriteArgs(val key: String, val value: String)
 
-    object WriteKVTool : Tool<WriteArgs, String>() {
-        override val argsSerializer: KSerializer<WriteArgs> = WriteArgs.serializer()
-        override val resultSerializer: KSerializer<String> = String.serializer()
-        override val description: String = "Writes a key-value pair (simulated)"
+    object WriteKVTool : Tool<WriteArgs, String>(
+        argsSerializer = WriteArgs.serializer(),
+        resultSerializer = String.serializer(),
+        name = "write_kv",
+        description = "Writes a key-value pair (simulated)"
+    ) {
         override suspend fun execute(args: WriteArgs): String {
             databaseMap[args.key] = args.value
             return "ok"
         }
     }
 
-    object DeleteKVTool : Tool<WriteArgs, String>() {
-        override val argsSerializer: KSerializer<WriteArgs> = WriteArgs.serializer()
-        override val resultSerializer: KSerializer<String> = String.serializer()
-        override val description: String = "Deletes a key-value pair (rollback)"
+    object DeleteKVTool : Tool<WriteArgs, String>(
+        argsSerializer = WriteArgs.serializer(),
+        resultSerializer = String.serializer(),
+        name = "delete_kv",
+        description = "Deletes a key-value pair (rollback)"
+    ) {
         var calls: MutableList<WriteArgs> = mutableListOf()
         override suspend fun execute(args: WriteArgs): String {
             databaseMap.remove(args.key)
@@ -212,7 +216,7 @@ class CheckpointsTests {
                 withPersistence { ctx ->
                     createCheckpoint(
                         ctx,
-                        currentNodeId ?: error("currentNodeId not set"),
+                        ctx.executionInfo.path(),
                         input,
                         typeOf<String>(),
                         checkpointId = checkpointId,
@@ -355,7 +359,7 @@ class CheckpointsTests {
         val testCheckpoint = AgentCheckpointData(
             checkpointId = "testCheckpointId",
             createdAt = time,
-            nodeId = "Node2",
+            nodePath = path(agentId, "straight-forward", "Node2"),
             lastInput = JsonPrimitive("Test input"),
             messageHistory = listOf(
                 Message.User("User message", metaInfo = RequestMetaInfo(time)),
@@ -397,7 +401,7 @@ class CheckpointsTests {
         val testCheckpoint2 = AgentCheckpointData(
             checkpointId = "testCheckpointId",
             createdAt = time,
-            nodeId = "Node1",
+            nodePath = path(agentId, "straight-forward", "Node1"),
             lastInput = JsonPrimitive("Test input"),
             messageHistory = listOf(
                 Message.User("User message", metaInfo = RequestMetaInfo(time)),
@@ -409,7 +413,7 @@ class CheckpointsTests {
         val testCheckpoint = AgentCheckpointData(
             checkpointId = "testCheckpointId",
             createdAt = time,
-            nodeId = "Node2",
+            nodePath = path(agentId, "straight-forward", "Node2"),
             lastInput = JsonPrimitive("Test input"),
             messageHistory = listOf(
                 Message.User("User message", metaInfo = RequestMetaInfo(time)),
