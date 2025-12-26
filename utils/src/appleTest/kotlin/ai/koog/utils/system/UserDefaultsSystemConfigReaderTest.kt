@@ -13,15 +13,15 @@ class UserDefaultsSystemConfigReaderTest {
         }
     }
 
-    private val sublect = UserDefaultsSystemConfigReader.shared
+    private val subject = UserDefaultsSystemConfigReader.shared
 
     @Test
     fun testReadValue() {
-        sublect.getConfigVariable("FOO_PROP") shouldBe "ho-ho"
+        subject.getConfigVariable("FOO_PROP") shouldBe "ho-ho"
     }
 
     @Test
     fun testReadMissingValue() {
-        sublect.getConfigVariable("BAR_PROP") shouldBe null
+        subject.getConfigVariable("BAR_PROP") shouldBe null
     }
 }
